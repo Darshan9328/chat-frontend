@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://172.20.10.3:8080/api';
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8080/api';
 
 interface LoginResponse {
   token: string;
@@ -54,7 +54,7 @@ class AuthService {
         username,
         password
       });
-
+      console.log("response.data", response.data);
       const { token, username: returnedUsername } = response.data;
       this.setToken(token);
       this.setUsername(returnedUsername);

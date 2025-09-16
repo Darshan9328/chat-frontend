@@ -4,8 +4,11 @@ import SockJS from 'sockjs-client';
 export interface ChatMessage {
   content: string;
   sender: string;
-  type: 'CHAT' | 'JOIN' | 'LEAVE';
+  recipient?: string;
+  conversationId?: string;
+  type: 'CHAT' | 'JOIN' | 'LEAVE' | 'TYPING' | 'ONLINE' | 'OFFLINE';
   timestamp: string;
+  status?: string;
 }
 
 export class WebSocketService {
@@ -15,10 +18,10 @@ export class WebSocketService {
   private maxReconnectAttempts: number = 5;
   private reconnectDelay: number = 3000;
 
-  connect(username: string, onMessageReceived: (message: ChatMessage) => void): Promise<void> {
+  connect(username: string, onMessageReceived: (message: ChatMessage) => void, onTyping?: (message: ChatMessage) => void): Promise<void> {
     return new Promise((resolve, reject) => {
       // Create WebSocket connection
-      const wsUrl = process.env.REACT_APP_WS_URL || 'http://172.20.10.3:8080/ws';
+      const wsUrl = process.env.REACT_APP_WS_URL || 'http://localhost:8080/ws';
       const socket = new SockJS(wsUrl);
       
       this.stompClient = new Client({
@@ -31,10 +34,29 @@ export class WebSocketService {
           this.connected = true;
           this.reconnectAttempts = 0; // Reset reconnect attempts on successful connection
           
-          // Subscribe to public topic to receive messages
-          this.stompClient?.subscribe('/topic/public', (message) => {
+          // Subscribe to user-specific queues resolved by broker (no username in path)
+          this.stompClient?.subscribe(`/user/queue/messages`, (message) => {
             const chatMessage: ChatMessage = JSON.parse(message.body);
             onMessageReceived(chatMessage);
+          });
+
+          // Fallback subscription: user-specific topic broadcast by server
+          this.stompClient?.subscribe(`/topic/user/${username}/queue/messages`, (message) => {
+            const chatMessage: ChatMessage = JSON.parse(message.body);
+            onMessageReceived(chatMessage);
+          });
+          
+          // Subscribe to typing indicators
+          this.stompClient?.subscribe(`/user/queue/typing`, (message) => {
+            const chatMessage: ChatMessage = JSON.parse(message.body);
+            if (onTyping) {
+              onTyping(chatMessage);
+            }
+          });
+          
+          // Subscribe to status updates
+          this.stompClient?.subscribe(`/user/queue/status`, (message) => {
+            console.log('Status update:', message.body);
           });
           
           // Send user join message
@@ -56,18 +78,55 @@ export class WebSocketService {
     });
   }
 
-  sendMessage(content: string, sender: string): void {
+  sendPrivateMessage(content: string, sender: string, recipient: string, conversationId: string): void {
     if (this.stompClient && this.connected) {
       const chatMessage: ChatMessage = {
         content,
         sender,
+        recipient,
+        conversationId,
+        type: 'CHAT',
+        timestamp: new Date().toISOString(),
+        status: 'SENT'
+      };
+      
+      this.stompClient.publish({
+        destination: '/app/chat.sendPrivateMessage',
+        body: JSON.stringify(chatMessage)
+      });
+    }
+  }
+
+  sendTypingIndicator(sender: string, recipient: string): void {
+    if (this.stompClient && this.connected) {
+      const typingMessage: ChatMessage = {
+        content: '',
+        sender,
+        recipient,
+        type: 'TYPING',
+        timestamp: new Date().toISOString()
+      };
+      
+      this.stompClient.publish({
+        destination: '/app/chat.typing',
+        body: JSON.stringify(typingMessage)
+      });
+    }
+  }
+
+  markAsRead(sender: string, conversationId: string): void {
+    if (this.stompClient && this.connected) {
+      const readMessage: ChatMessage = {
+        content: '',
+        sender,
+        conversationId,
         type: 'CHAT',
         timestamp: new Date().toISOString()
       };
       
       this.stompClient.publish({
-        destination: '/app/chat.sendMessage',
-        body: JSON.stringify(chatMessage)
+        destination: '/app/chat.markAsRead',
+        body: JSON.stringify(readMessage)
       });
     }
   }

@@ -1,26 +1,38 @@
 import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
 import { WebSocketService, ChatMessage } from './services/WebSocketService';
-import './App.css';
+import { ChatSidebar } from './components/ChatSidebar';
+import { ChatArea } from './components/ChatArea';
+import { apiService } from './services/apiService';
+import authService from './services/authService';
+import './styles/ChatApp.css';
+import './App.css'; // Keep for any remaining legacy styles
 
-const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://172.20.10.3:8080/api' ;
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://192.168.1.78:8080/api';
 
 function App() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [newMessage, setNewMessage] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>('Disconnected');
   
+  // Private messaging state
+  const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
+  const [otherParticipant, setOtherParticipant] = useState<string | null>(null);
+  const [typingUsers, setTypingUsers] = useState<string[]>([]);
+  const [refreshConversations, setRefreshConversations] = useState(0); // Counter to trigger sidebar refresh
+  
   const webSocketService = useRef<WebSocketService | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatAreaRef = useRef<any>(null);
+  const sidebarRef = useRef<any>(null);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Check for existing authentication on app start
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    const savedUsername = authService.getUsername();
+    if (savedUsername && authService.isAuthenticated()) {
+      setCurrentUser(savedUsername);
+    }
+  }, []);
 
   // Connect to WebSocket when user logs in
   useEffect(() => {
@@ -35,15 +47,116 @@ function App() {
     };
   }, [currentUser]);
 
+  // Function to show browser notification for new messages
+  const showMessageNotification = (message: ChatMessage) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const notification = new Notification(`New message from ${message.sender}`, {
+        body: message.content,
+        icon: '/favicon.ico', // You can add a custom icon here
+        tag: `message-${message.sender}` // This prevents duplicate notifications
+      });
+      
+      // Auto close notification after 5 seconds
+      setTimeout(() => notification.close(), 5000);
+      
+      // Optional: Click to focus on the conversation
+      notification.onclick = () => {
+        window.focus();
+        // You could also automatically select the conversation here
+        notification.close();
+      };
+    }
+  };
+
+  // Request notification permission when user logs in
+  useEffect(() => {
+    if (currentUser && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, [currentUser]);
+
   const connectToWebSocket = async () => {
     try {
       setConnectionStatus('Connecting...');
       webSocketService.current = new WebSocketService();
-      
-      await webSocketService.current.connect(currentUser!, (message: ChatMessage) => {
-        setMessages(prev => [...prev, message]);
-      });
-      
+
+      // Simple de-dup cache for incoming messages (content+sender+timestamp+conv)
+      const recentKeys = new Set<string>();
+      const remember = (key: string) => {
+        recentKeys.add(key);
+        setTimeout(() => recentKeys.delete(key), 10000); // keep for 10s
+      };
+
+      await webSocketService.current.connect(
+        currentUser!,
+        (message: ChatMessage) => {
+          console.log('=== WebSocket Message Received ===');
+          console.log('Message:', message);
+          console.log('Type:', message.type);
+          console.log('Sender:', message.sender);
+          console.log('Recipient:', message.recipient);
+          console.log('ConversationId:', message.conversationId);
+
+          if (message.type === 'CHAT') {
+            // Skip echo of self-sent messages (we already add optimistically)
+            if (message.sender === currentUser) {
+              return;
+            }
+
+            // Only show messages for the active conversation
+            if (message.conversationId !== selectedConversation) {
+              // Still refresh sidebar for previews/unreads
+              if (sidebarRef.current) sidebarRef.current.refreshConversations();
+              else setRefreshConversations(prev => prev + 1);
+              return;
+            }
+
+            const key = `${message.sender}|${message.recipient}|${message.timestamp}|${message.conversationId}|${message.content}`;
+            if (recentKeys.has(key)) {
+              return; // duplicate from multiple subscriptions
+            }
+            remember(key);
+
+            const messageForChat = {
+              content: message.content,
+              senderUsername: message.sender,
+              recipientUsername: message.recipient || '',
+              createdAt: message.timestamp
+            };
+
+            if (chatAreaRef.current) {
+              console.log('[App] Calling chatAreaRef.current.addMessage with:', messageForChat);
+              chatAreaRef.current.addMessage(messageForChat);
+            }
+
+            // Refresh sidebar to show latest preview
+            if (sidebarRef.current) {
+              sidebarRef.current.refreshConversations();
+            } else {
+              setRefreshConversations(prev => prev + 1);
+            }
+
+            showMessageNotification(message);
+          }
+        },
+        (message: ChatMessage) => {
+          // Handle typing indicators
+          if (message.type === 'TYPING') {
+            setTypingUsers(prev => {
+              if (!prev.includes(message.sender)) {
+                return [...prev, message.sender];
+              }
+              return prev;
+            });
+
+            // Remove typing indicator after 3 seconds
+            setTimeout(() => {
+              setTypingUsers(prev => prev.filter(user => user !== message.sender));
+            }, 3000);
+          }
+        }
+      );
+
       setConnectionStatus('Connected');
     } catch (error) {
       console.error('WebSocket connection failed:', error);
@@ -53,74 +166,88 @@ function App() {
 
   const handleAuth = async () => {
     try {
-      const endpoint = isRegistering ? '/register' : '/login';
-      alert(API_BASE_URL);
-      const response = await axios.post(`${API_BASE_URL}${endpoint}`, {
-        username,
-        password
-      });
-      
-      if (response.data.username || response.data.message.includes('registered')) {
+      if (isRegistering) {
+        await authService.register(username, password);
+        alert('Registration successful! Please login.');
+        setIsRegistering(false);
+      } else {
+        const response = await authService.login(username, password);
+        console.log('Login successful:', response);
         setCurrentUser(username);
         setUsername('');
         setPassword('');
-        // Load recent messages from database
-        await loadRecentMessages();
       }
     } catch (error: any) {
-      alert(error.response?.data?.error || 'Authentication failed');
+      console.error('Authentication error:', error);
+      alert(error.message || 'Authentication failed');
     }
   };
 
-  const loadRecentMessages = async () => {
+  // Handle conversation selection
+  const handleConversationSelect = async (conversationId: string, participant: string) => {
+    setSelectedConversation(conversationId);
+    setOtherParticipant(participant);
+
+    // Mark messages as read for this conversation and refresh sidebar counts
     try {
-      const response = await axios.get(`${API_BASE_URL}/messages`);
-      const dbMessages: ChatMessage[] = response.data.map((msg: any) => ({
-        content: msg.content,
-        sender: msg.senderUsername,
-        type: 'CHAT' as const,
-        timestamp: msg.createdAt
-      })).reverse();
-      
-      setMessages(dbMessages);
-    } catch (error) {
-      console.error('Error loading messages:', error);
+      await apiService.markMessagesAsRead(conversationId, currentUser!);
+    } catch (e) {
+      console.error('Failed to mark messages as read:', e);
+    }
+
+    if (sidebarRef.current) {
+      sidebarRef.current.refreshConversations();
+    } else {
+      setRefreshConversations(prev => prev + 1);
     }
   };
 
-  const sendMessage = () => {
-    if (!newMessage.trim() || !webSocketService.current?.isConnected()) return;
+  // Handle sending private message
+  const handleSendMessage = (message: string, recipient: string, conversationId: string) => {
+    if (!webSocketService.current?.isConnected()) return;
 
-    webSocketService.current.sendMessage(newMessage, currentUser!);
-    setNewMessage('');
+    // Send via WebSocket
+    webSocketService.current.sendPrivateMessage(message, currentUser!, recipient, conversationId);
+
+    // Optimistically add the message to the chat area for instant display
+    const optimisticMessage = {
+      content: message,
+      senderUsername: currentUser!,
+      recipientUsername: recipient,
+      createdAt: new Date().toISOString(),
+      status: 'SENT'
+    };
+    if (chatAreaRef.current?.addMessage) {
+      chatAreaRef.current.addMessage(optimisticMessage);
+    }
+
+    // Refresh conversations so sidebar shows latest preview
+    if (sidebarRef.current) {
+      sidebarRef.current.refreshConversations();
+    } else {
+      setRefreshConversations(prev => prev + 1);
+    }
   };
 
   const logout = () => {
     if (webSocketService.current) {
       webSocketService.current.disconnect();
     }
+    authService.logout(); // Clear stored auth data
     setCurrentUser(null);
-    setMessages([]);
+    setSelectedConversation(null);
+    setOtherParticipant(null);
+    setTypingUsers([]);
     setConnectionStatus('Disconnected');
   };
 
-  const getMessageStyle = (message: ChatMessage) => {
-    switch (message.type) {
-      case 'JOIN':
-        return { backgroundColor: '#d4edda', color: '#155724' };
-      case 'LEAVE':
-        return { backgroundColor: '#f8d7da', color: '#721c24' };
-      default:
-        return {};
-    }
-  };
 
   if (!currentUser) {
     return (
       <div className="App">
         <div className="auth-container">
-          <h1>Real-time Chat</h1>
           <div className="auth-form">
+            <h1>Private Chat</h1>
             <input
               type="text"
               placeholder="Username"
@@ -147,46 +274,24 @@ function App() {
 
   return (
     <div className="App">
-      <div className="chat-container">
-        <div className="chat-header">
-          <h1>Real-time Chat</h1>
-          <div className="header-info">
-            <span className={`status ${connectionStatus.toLowerCase().replace(' ', '-')}`}>
-              {connectionStatus}
-            </span>
-            <span>Welcome, {currentUser}!</span>
-            <button onClick={logout}>Logout</button>
-          </div>
-        </div>
-        
-        <div className="messages-container">
-          {messages.map((message, index) => (
-            <div key={index} className="message" style={getMessageStyle(message)}>
-              <strong>{message.sender}:</strong> {message.content}
-              <span className="timestamp">
-                {new Date(message.timestamp).toLocaleTimeString()}
-              </span>
-            </div>
-          ))}
-          <div ref={messagesEndRef} />
-        </div>
-        
-        <div className="input-container">
-          <input
-            type="text"
-            placeholder="Type your message..."
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-            disabled={connectionStatus !== 'Connected'}
-          />
-          <button 
-            onClick={sendMessage}
-            disabled={connectionStatus !== 'Connected'}
-          >
-            Send
-          </button>
-        </div>
+      <div className="chat-app">
+        <ChatSidebar
+          ref={sidebarRef}
+          currentUser={currentUser}
+          selectedConversation={selectedConversation}
+          onConversationSelect={handleConversationSelect}
+          onLogout={logout}
+          refreshTrigger={refreshConversations}
+        />
+        <ChatArea
+          ref={chatAreaRef}
+          conversationId={selectedConversation}
+          otherParticipant={otherParticipant}
+          currentUser={currentUser}
+          onSendMessage={handleSendMessage}
+          typingUsers={typingUsers}
+          webSocketService={webSocketService.current}
+        />
       </div>
     </div>
   );
