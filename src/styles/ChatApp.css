@@ -165,11 +165,26 @@ body {
   display: flex;
   height: 100vh;
   background-color: var(--chat-bg);
+  /* Mobile-first: stack sidebar and chat */
+  flex-direction: column;
+}
+
+/* Responsive layout: desktop 30% sidebar / 70% chat */
+@media (min-width: 1024px) {
+  .chat-app { flex-direction: row; }
+  .chat-sidebar { flex: 0 0 30%; max-width: 30%; height: 100vh; }
+  .chat-main { flex: 0 0 70%; max-width: 70%; height: 100vh; }
+}
+
+/* Tablet & mobile: sidebar on top, chat fills remaining */
+@media (max-width: 1023.98px) {
+  .chat-sidebar { width: 100%; height: 40vh; }
+  .chat-main { width: 100%; flex: 1 1 auto; }
 }
 
 /* Sidebar Styles */
 .chat-sidebar {
-  width: 350px;
+  width: 100%;
   background-color: var(--sidebar-bg);
   border-right: 1px solid var(--border-color);
   display: flex;

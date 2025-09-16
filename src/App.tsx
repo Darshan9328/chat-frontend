@@ -5,6 +5,7 @@ import { ChatArea } from './components/ChatArea';
 import { apiService } from './services/apiService';
 import authService from './services/authService';
 import './styles/ChatApp.css';
+import './styles/ModernChat.css';
 import './App.css'; // Keep for any remaining legacy styles
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://192.168.1.78:8080/api';
@@ -15,6 +16,22 @@ function App() {
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>('Disconnected');
+
+  // Theme (light/dark)
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('theme') === 'dark';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    const theme = isDark ? 'dark' : 'light';
+    try {
+      localStorage.setItem('theme', theme);
+    } catch {}
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [isDark]);
   
   // Private messaging state
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
@@ -25,6 +42,8 @@ function App() {
   const webSocketService = useRef<WebSocketService | null>(null);
   const chatAreaRef = useRef<any>(null);
   const sidebarRef = useRef<any>(null);
+  const selectedConversationRef = useRef<string | null>(null);
+  const otherParticipantRef = useRef<string | null>(null);
 
   // Check for existing authentication on app start
   useEffect(() => {
@@ -39,13 +58,17 @@ function App() {
     if (currentUser) {
       connectToWebSocket();
     }
+
+    // keep refs in sync when state changes
+    selectedConversationRef.current = selectedConversation;
+    otherParticipantRef.current = otherParticipant;
     
     return () => {
       if (webSocketService.current) {
         webSocketService.current.disconnect();
       }
     };
-  }, [currentUser]);
+  }, [currentUser, selectedConversation, otherParticipant]);
 
   // Function to show browser notification for new messages
   const showMessageNotification = (message: ChatMessage) => {
@@ -103,8 +126,9 @@ function App() {
               return;
             }
 
-            // Only show messages for the active conversation
-            if (message.conversationId !== selectedConversation) {
+            // Only show messages for the active conversation (using refs to avoid stale closures)
+            const activeConversationId = selectedConversationRef.current;
+            if (message.conversationId !== activeConversationId) {
               // Still refresh sidebar for previews/unreads
               if (sidebarRef.current) sidebarRef.current.refreshConversations();
               else setRefreshConversations(prev => prev + 1);
@@ -129,11 +153,28 @@ function App() {
               chatAreaRef.current.addMessage(messageForChat);
             }
 
-            // Refresh sidebar to show latest preview
-            if (sidebarRef.current) {
-              sidebarRef.current.refreshConversations();
+            // Mark as read immediately for active conversation and refresh sidebar counts
+            if (activeConversationId && currentUser) {
+              apiService.markMessagesAsRead(activeConversationId, currentUser)
+                .then(() => {
+                  // Also emit read receipt over WS (if supported)
+                  if (webSocketService.current?.isConnected()) {
+                    webSocketService.current.markAsRead(currentUser, activeConversationId);
+                  }
+                  if (sidebarRef.current) {
+                    sidebarRef.current.refreshConversations();
+                  } else {
+                    setRefreshConversations(prev => prev + 1);
+                  }
+                })
+                .catch((e) => console.error('Failed to mark messages as read:', e));
             } else {
-              setRefreshConversations(prev => prev + 1);
+              // Fallback: just refresh sidebar to show latest preview
+              if (sidebarRef.current) {
+                sidebarRef.current.refreshConversations();
+              } else {
+                setRefreshConversations(prev => prev + 1);
+              }
             }
 
             showMessageNotification(message);
@@ -153,6 +194,26 @@ function App() {
             setTimeout(() => {
               setTypingUsers(prev => prev.filter(user => user !== message.sender));
             }, 3000);
+          }
+        },
+        // onRead receipt handler: when the other user reads messages
+        (readMessage: ChatMessage) => {
+          try {
+            // Only process for the active conversation
+            const activeConversationId = selectedConversationRef.current;
+            if (readMessage.conversationId === activeConversationId) {
+              if (chatAreaRef.current?.markAllSentAsRead) {
+                chatAreaRef.current.markAllSentAsRead();
+              }
+              // Also refresh sidebar to reflect zero unread
+              if (sidebarRef.current) {
+                sidebarRef.current.refreshConversations();
+              } else {
+                setRefreshConversations(prev => prev + 1);
+              }
+            }
+          } catch (e) {
+            console.error('Failed processing READ receipt:', e);
           }
         }
       );
@@ -187,6 +248,8 @@ function App() {
   const handleConversationSelect = async (conversationId: string, participant: string) => {
     setSelectedConversation(conversationId);
     setOtherParticipant(participant);
+    selectedConversationRef.current = conversationId;
+    otherParticipantRef.current = participant;
 
     // Mark messages as read for this conversation and refresh sidebar counts
     try {
@@ -293,6 +356,12 @@ function App() {
           webSocketService={webSocketService.current}
         />
       </div>
+      <button
+        className="theme-toggle"
+        title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+        aria-label="Toggle theme"
+        onClick={() => setIsDark(v => !v)}
+      >{isDark ? '🌙' : '☀️'}</button>
     </div>
   );
 }

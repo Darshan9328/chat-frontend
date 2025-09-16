@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { apiService } from '../services/apiService';
 import { WebSocketService } from '../services/WebSocketService';
 
@@ -37,6 +37,25 @@ export const ChatArea = React.forwardRef<any, ChatAreaProps>((
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Emoji picker state
+  const [showEmoji, setShowEmoji] = useState(false);
+  const emojis = ['😀','😂','😊','😍','😎','😢','😡','👍','🙏','🎉','🔥','❤️','😉','😭','🤔','🙌','✨','🥳','😴','🤖'];
+  const insertEmoji = (emoji: string) => {
+    const el = inputRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? newMessage.length;
+    const end = el.selectionEnd ?? newMessage.length;
+    const updated = newMessage.slice(0, start) + emoji + newMessage.slice(end);
+    setNewMessage(updated);
+    // restore caret position and trigger auto-resize
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = start + emoji.length;
+      el.setSelectionRange(pos, pos);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  };
 
   useEffect(() => {
     if (conversationId) {
@@ -82,6 +101,7 @@ export const ChatArea = React.forwardRef<any, ChatAreaProps>((
 
     onSendMessage(newMessage, otherParticipant, conversationId);
     setNewMessage('');
+    setShowEmoji(false);
     
     // Focus back to input
     setTimeout(() => {
@@ -126,15 +146,23 @@ export const ChatArea = React.forwardRef<any, ChatAreaProps>((
   };
 
   // Add new message to the list (called from parent when receiving real-time messages)
-  const addMessage = (message: Message) => {
-  console.log('[ChatArea] addMessage called:', message);
-  setMessages(prev => [...prev, message]);
-  };
+  const addMessage = useCallback((message: Message) => {
+    console.log('[ChatArea] addMessage called:', message);
+    setMessages(prev => [...prev, message]);
+  }, []);
 
-  // Expose addMessage method to parent component
+  // Mark all sent messages as READ in the current conversation
+  const markAllSentAsRead = useCallback(() => {
+    setMessages(prev => prev.map(m => (
+      m.senderUsername === currentUser ? { ...m, status: 'READ' } : m
+    )));
+  }, [currentUser]);
+
+  // Expose methods to parent component
   React.useImperativeHandle(ref, () => ({
-    addMessage
-  }), []);
+    addMessage,
+    markAllSentAsRead
+  }), [addMessage, markAllSentAsRead]);
 
   if (!conversationId || !otherParticipant) {
     return (
@@ -164,6 +192,24 @@ export const ChatArea = React.forwardRef<any, ChatAreaProps>((
             )}
           </div>
         </div>
+        <div className="chat-header-actions">
+          <button
+            className="icon-button"
+            title="Search in conversation"
+            aria-label="Search in conversation"
+            onClick={() => inputRef.current?.focus()}
+          >
+            🔎
+          </button>
+          <button
+            className="icon-button"
+            title="Details"
+            aria-label="Conversation details"
+            onClick={() => alert(`Conversation with ${otherParticipant}`)}
+          >
+            ℹ️
+          </button>
+        </div>
       </div>
 
       <div className="messages-container">
@@ -179,34 +225,119 @@ export const ChatArea = React.forwardRef<any, ChatAreaProps>((
           </div>
         ) : (
           <div className="messages-list">
-            {messages.map((message, index) => {
-              const isSent = message.senderUsername === currentUser;
-              return (
-                <div
-                  key={message.id || index}
-                  className={`message-bubble ${isSent ? 'sent' : 'received'}`}
-                >
-                  <div className="message-content">
-                    {message.content}
-                  </div>
-                  <div className="message-time">
-                    {formatMessageTime(message.createdAt)}
-                    {isSent && (
-                      <span className="message-status">
-                        {message.status === 'READ' ? '✓✓' : '✓'}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {(() => {
+              // Group messages by day and by consecutive sender to create clean clusters
+              const groups: Array<{
+                key: string;
+                dateKey: string;
+                messages: Message[];
+              }> = [];
+
+              const getDateKey = (ts: string) => {
+                const d = new Date(ts);
+                return `${d.getFullYear()}-${d.getMonth()+1}-${d.getDate()}`;
+              };
+
+              let currentDateKey: string | null = null;
+              let buffer: Message[] = [];
+
+              const flush = (dateKey: string) => {
+                if (buffer.length) {
+                  groups.push({ key: `${dateKey}-${groups.length}`, dateKey, messages: buffer });
+                  buffer = [];
+                }
+              };
+
+              messages.forEach((m, idx) => {
+                const dk = getDateKey(m.createdAt);
+                if (currentDateKey === null) currentDateKey = dk;
+                if (dk !== currentDateKey) {
+                  flush(currentDateKey);
+                  currentDateKey = dk;
+                }
+                buffer.push(m);
+                if (idx === messages.length - 1) {
+                  flush(currentDateKey!);
+                }
+              });
+
+              // Render per-date groups with separators and sender clusters
+              return groups.map((g, gi) => (
+                <React.Fragment key={g.key}>
+                  <div className="date-separator"><span>{new Date(g.messages[0].createdAt).toLocaleDateString()}</span></div>
+                  {(() => {
+                    const rows: React.ReactElement[] = [];
+                    let cluster: Message[] = [];
+                    const flushCluster = () => {
+                      if (!cluster.length) return;
+                      const isSent = cluster[0].senderUsername === currentUser;
+                      rows.push(
+                        <div className={`message-row ${isSent ? 'sent' : 'received'}`} key={`row-${gi}-${rows.length}`}>
+                          {!isSent && (
+                            <div className="message-avatar">{getInitials(cluster[0].senderUsername)}</div>
+                          )}
+                          <div className="message-group">
+                            {cluster.map((cm, ci) => {
+                              const first = ci === 0;
+                              const last = ci === cluster.length - 1;
+                              const cls = `message-bubble ${isSent ? 'sent' : 'received'} ${first ? 'first-in-group' : last ? 'last-in-group' : 'middle-in-group'}`;
+                              return (
+                                <div className={cls} key={`bubble-${gi}-${rows.length}-${ci}`}>
+                                  <div className="message-content">{cm.content}</div>
+                                  <div className="message-time">
+                                    {formatMessageTime(cm.createdAt)}
+                                    {isSent && (
+                                      <span className="message-status">{cm.status === 'READ' ? '✓✓' : '✓'}</span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                      cluster = [];
+                    };
+
+                    for (let i = 0; i < g.messages.length; i++) {
+                      const m = g.messages[i];
+                      if (!cluster.length) {
+                        cluster.push(m);
+                      } else {
+                        const sameSender = cluster[cluster.length - 1].senderUsername === m.senderUsername;
+                        if (sameSender) cluster.push(m);
+                        else { flushCluster(); cluster.push(m); }
+                      }
+                    }
+                    flushCluster();
+
+                    return rows;
+                  })()}
+                </React.Fragment>
+              ));
+            })()}
             <div ref={messagesEndRef} />
           </div>
         )}
       </div>
 
       <div className="message-input-container">
+        {showEmoji && (
+          <div className="emoji-panel">
+            {emojis.map((e, i) => (
+              <div key={i} className="emoji-item" onClick={() => insertEmoji(e)}>{e}</div>
+            ))}
+          </div>
+        )}
         <div className="message-input-form">
+          <div className="input-actions">
+            <button
+              className="emoji-toggle"
+              title="Emoji"
+              aria-label="Open emoji picker"
+              onClick={() => setShowEmoji(v => !v)}
+            >😊</button>
+          </div>
           <textarea
             ref={inputRef}
             className="message-input"

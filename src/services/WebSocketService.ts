@@ -6,7 +6,7 @@ export interface ChatMessage {
   sender: string;
   recipient?: string;
   conversationId?: string;
-  type: 'CHAT' | 'JOIN' | 'LEAVE' | 'TYPING' | 'ONLINE' | 'OFFLINE';
+  type: 'CHAT' | 'JOIN' | 'LEAVE' | 'TYPING' | 'ONLINE' | 'OFFLINE' | 'READ';
   timestamp: string;
   status?: string;
 }
@@ -18,7 +18,7 @@ export class WebSocketService {
   private maxReconnectAttempts: number = 5;
   private reconnectDelay: number = 3000;
 
-  connect(username: string, onMessageReceived: (message: ChatMessage) => void, onTyping?: (message: ChatMessage) => void): Promise<void> {
+  connect(username: string, onMessageReceived: (message: ChatMessage) => void, onTyping?: (message: ChatMessage) => void, onRead?: (message: ChatMessage) => void): Promise<void> {
     return new Promise((resolve, reject) => {
       // Create WebSocket connection
       const wsUrl = process.env.REACT_APP_WS_URL || 'http://localhost:8080/ws';
@@ -54,9 +54,18 @@ export class WebSocketService {
             }
           });
           
-          // Subscribe to status updates
+          // Subscribe to read receipts (status updates)
           this.stompClient?.subscribe(`/user/queue/status`, (message) => {
-            console.log('Status update:', message.body);
+            try {
+              const chatMessage: ChatMessage = JSON.parse(message.body);
+              if (chatMessage.type === 'READ' && onRead) {
+                onRead(chatMessage);
+              } else {
+                console.log('Status update:', message.body);
+              }
+            } catch (e) {
+              console.log('Status update:', message.body);
+            }
           });
           
           // Send user join message
@@ -120,7 +129,7 @@ export class WebSocketService {
         content: '',
         sender,
         conversationId,
-        type: 'CHAT',
+        type: 'READ',
         timestamp: new Date().toISOString()
       };
       
